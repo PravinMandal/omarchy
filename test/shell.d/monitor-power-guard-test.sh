@@ -295,6 +295,15 @@ assert_enabled HDMI-A-1
 assert_state_absent
 pass "a transient confirmation error does not disable the monitor"
 
+# The off answer is already strong evidence. A timeout on the confirmation
+# read must not crash the timeout path or turn a dark monitor back on.
+reset_state
+printf 'VCP D6 SNC x04\nERR:timeout\n' >"$ddc_sequence"
+run_guard --once >"$guard_log" 2>&1 || fail "guard handles a timeout after an off answer"
+assert_disabled HDMI-A-1
+assert_state_exists
+pass "a timeout after an off answer still suspends the monitor"
+
 reset_state
 printf 'VCP D6 SNC x04\nVCP D6 SNC x01\n' >"$ddc_sequence"
 run_guard --once >"$guard_log" 2>&1 || fail "guard accepts a monitor that answers on confirmation"
@@ -395,6 +404,19 @@ grep -F 'no other active display is available' "$guard_log" >/dev/null ||
   fail "guard reports why it left the only display enabled"
 pass "the last active display is never disabled"
 
+# If the fallback disappears too, the session has no enabled output. Saved
+# recovery must still run instead of returning early on the DPMS check.
+reset_state
+printf 'VCP D6 SNC x04\nVCP D6 SNC x04\n' >"$ddc_sequence"
+run_guard --once >"$guard_log" 2>&1 || fail "guard saves an outage before the all-disabled test"
+assert_disabled HDMI-A-1
+disable_internal
+printf 'VCP D6 SNC x01\nVCP D6 SNC x01\n' >"$ddc_sequence"
+run_guard --once >"$guard_log" 2>&1 || fail "guard restores when every output is disabled"
+assert_enabled HDMI-A-1
+assert_state_absent
+pass "saved recovery runs when every output is disabled"
+
 # A reload or manual enable can put a suspended output back without a DDC
 # answer. The guard must put the dark output back out of service and keep the
 # saved state for the real recovery.
@@ -408,6 +430,17 @@ run_guard --once >"$guard_log" 2>&1 || fail "guard reconciles a re-enabled dark 
 assert_disabled HDMI-A-1
 assert_state_exists
 pass "a dark output re-enabled by a reload is disabled again"
+
+# The timeout path also runs while reconciling an enabled suspended output.
+reset_state
+printf 'VCP D6 SNC x04\nVCP D6 SNC x04\n' >"$ddc_sequence"
+run_guard --once >"$guard_log" 2>&1 || fail "guard saves an outage before the suspended timeout test"
+set_output HDMI-A-1 false
+printf 'ERR:timeout\nERR:timeout\n' >"$ddc_sequence"
+run_guard --once >"$guard_log" 2>&1 || fail "guard handles a suspended output that times out"
+assert_disabled HDMI-A-1
+assert_state_exists
+pass "a suspended output that times out is disabled again"
 
 # The fallback display can disappear after the outage. Re-disabling the dark
 # output then would leave the session with no output at all.
@@ -450,6 +483,23 @@ assert_enabled HDMI-A-1
 assert_state_absent
 assert_flag_absent
 pass "turning the guard off restores a stranded output even without DDC"
+
+# Turning the guard off must not apply the old monitor's layout to a
+# replacement attached to the same output.
+reset_state
+run_toggle on >/dev/null 2>&1 || fail "toggle on before the replacement-restore test"
+printf 'VCP D6 SNC x04\nVCP D6 SNC x04\n' >"$ddc_sequence"
+run_guard --once >"$guard_log" 2>&1 || fail "guard saves an outage before the replacement-restore test"
+printf 'replacement-edid\n' >"$drm/card1-HDMI-A-1/edid"
+: >"$actions"
+run_toggle off >"$guard_log" 2>&1 || fail "toggle off succeeds with a replacement monitor"
+assert_enabled HDMI-A-1
+assert_state_absent
+assert_action_contains 'mode = "preferred"'
+if grep -F 'mode = "1920x1080@144"' "$actions" >/dev/null; then
+  fail "off does not apply the old monitor's layout to a replacement"
+fi
+pass "turning the guard off uses the safe layout for a replacement monitor"
 
 reset_state
 FAKE_SYSTEMCTL_FAIL=enable run_toggle on >/dev/null 2>&1

@@ -129,6 +129,11 @@ any_dpms_on() {
     <<<"$MONITORS" >/dev/null 2>&1
 }
 
+any_output_enabled() {
+  jq -e 'any(.[]; ((.name | test("^HEADLESS-")) | not) and ((.mirrorOf // "none") == "none") and (.disabled // false) != true)' \
+    <<<"$MONITORS" >/dev/null 2>&1
+}
+
 other_live_output_count() {
   local output=$1
   jq -r --arg output "$output" '
@@ -532,6 +537,8 @@ ddc_verified_on() {
 disable_existing() {
   local output=$1 now other
   safe_output "$output" || return 0
+  load_monitors || return 0
+  any_dpms_on || return 0
   now=$EPOCHSECONDS
   other=$(other_live_output_count "$output") || other=0
   is_int "$other" || other=0
@@ -549,6 +556,13 @@ disable_existing() {
 disable_output() {
   local output=$1 reason=$2 monitor config edid description other now
   safe_output "$output" || return 1
+
+  # The probes before this point may have taken several seconds. Re-read the
+  # monitor list so the fallback and DPMS checks cannot act on a stale snapshot.
+  load_monitors || {
+    log "could not refresh the monitor list before disabling $output"
+    return 0
+  }
   monitor=$(monitor_json "$output") || return 1
   [[ -n $monitor ]] || return 1
 
@@ -625,7 +639,7 @@ disable_suspended() {
     return 0
   fi
 
-  if [[ $DDC_STATUS == "error" ]] && ddc_failure && ddc_known; then
+  if [[ $DDC_STATUS == "error" ]] && ddc_failure && ddc_known "$output"; then
     sleep "$CONFIRM_DELAY"
     probe_power "$bus" "$output" || true
   fi
@@ -635,7 +649,7 @@ disable_suspended() {
     return 0
   fi
 
-  if [[ $DDC_STATUS == "off" ]] || { [[ $DDC_STATUS == "error" ]] && ddc_failure && ddc_known; }; then
+  if [[ $DDC_STATUS == "off" ]] || { [[ $DDC_STATUS == "error" ]] && ddc_failure && ddc_known "$output"; }; then
     disable_existing "$output"
   else
     log "DDC probe for enabled $output is inconclusive ($DDC_KIND: $DDC_DETAIL); leaving it enabled"
@@ -672,7 +686,7 @@ restore_output() {
   fi
 
   if ! ddc_verified_on "$output"; then
-    if [[ $DDC_STATUS == "off" ]] || { [[ $DDC_STATUS == "error" ]] && ddc_failure && ddc_known; }; then
+    if [[ $DDC_STATUS == "off" ]] || { [[ $DDC_STATUS == "error" ]] && ddc_failure && ddc_known "$output"; }; then
       other=$(other_live_output_count "$output") || other=0
       is_int "$other" || other=0
       if (( other <= 0 )); then
@@ -707,10 +721,9 @@ restore_all() {
 
     monitor=$(monitor_json "$output" 2>/dev/null) || monitor=""
     if [[ -n $monitor ]] && jq -e '.disabled == true' <<<"$monitor" >/dev/null 2>&1; then
-      config=$(state_get "$output" '.config // {}')
-      if ! jq -e '((.mode // "") | length) > 0' <<<"$config" >/dev/null 2>&1; then
-        config=$(safe_config "$monitor")
-      fi
+      # Turning the guard off is best effort, but a replacement monitor on the
+      # same port must not inherit an unsupported layout from the old one.
+      config=$(restore_config_for "$output" "$monitor")
       lua=$(restore_lua_for "$output" "$config") || lua=""
       if [[ -n $lua ]]; then
         hyprctl_safe eval "$lua" >/dev/null 2>&1 || true
@@ -784,7 +797,7 @@ check_active_output() {
         off) disable_output "$output" "off" ;;
         on) NO_FALLBACK_UNTIL[$output]=0 ;;
         error)
-          if ddc_failure && ddc_known; then
+          if ddc_failure && ddc_known "$output"; then
             # The monitor answered off, then stopped answering. That is still
             # the power-loss case, not a reason to put it back in service.
             disable_output "$output" "unreachable"
@@ -842,6 +855,13 @@ check_once() {
 
   if ! any_dpms_on; then
     LAST_DPMS_ON=0
+    # Ordinary screen sleep leaves an enabled output behind. If every output
+    # is disabled, however, a saved monitor may be the only way back and still
+    # deserves a DDC check.
+    if ! any_output_enabled; then
+      check_suspended
+      load_monitors || true
+    fi
     return 0
   fi
 
