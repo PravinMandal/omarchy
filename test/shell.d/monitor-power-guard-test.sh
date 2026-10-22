@@ -133,8 +133,8 @@ set_monitors() {
 default_monitors() {
   cat >"$monitors" <<'JSON'
 [
-  {"name":"eDP-1","mirrorOf":"none","disabled":false,"width":2560,"height":1600,"refreshRate":120,"x":0,"y":0,"scale":2,"transform":0,"vrr":false,"dpmsStatus":true,"availableModes":["2560x1600@120.00Hz"]},
-  {"name":"HDMI-A-1","mirrorOf":"none","disabled":false,"width":1920,"height":1080,"refreshRate":144,"x":1280,"y":0,"scale":1.25,"transform":0,"vrr":false,"dpmsStatus":true,"availableModes":["1920x1080@144.00Hz","1920x1080@60.00Hz"]}
+  {"name":"eDP-1","description":"Laptop Panel TEST","mirrorOf":"none","disabled":false,"width":2560,"height":1600,"refreshRate":120,"x":0,"y":0,"scale":2,"transform":0,"vrr":false,"dpmsStatus":true,"availableModes":["2560x1600@120.00Hz"]},
+  {"name":"HDMI-A-1","description":"Acer EK240Y TEST","mirrorOf":"none","disabled":false,"width":1920,"height":1080,"refreshRate":144,"x":1280,"y":0,"scale":1.25,"transform":0,"vrr":false,"dpmsStatus":true,"availableModes":["1920x1080@144.00Hz","1920x1080@60.00Hz"]}
 ]
 JSON
 }
@@ -349,11 +349,28 @@ assert_state_absent
 assert_action_contains 'mode = "1920x1080@144"'
 pass "an unreadable EDID keeps the saved monitor layout"
 
+# Some setups expose a zero-byte DRM EDID. Hyprland's description, including
+# the monitor serial when the kernel supplies one, is the fallback identity.
+reset_state
+rm -f "$drm/card1-HDMI-A-1/edid"
+printf 'VCP D6 SNC x04\nVCP D6 SNC x04\n' >"$ddc_sequence"
+run_guard --once >"$guard_log" 2>&1 || fail "guard saves an outage with no sysfs EDID"
+assert_disabled HDMI-A-1
+assert_state_exists
+jq -e '.edid == "" and .description == "Acer EK240Y TEST"' "$state/suspended/HDMI-A-1.json" >/dev/null ||
+  fail "guard saves the description when EDID is unavailable"
+printf 'VCP D6 SNC x01\nVCP D6 SNC x01\n' >"$ddc_sequence"
+run_guard --once >"$guard_log" 2>&1 || fail "guard restores a monitor identified by description"
+assert_enabled HDMI-A-1
+assert_state_absent
+assert_action_contains 'mode = "1920x1080@144"'
+pass "a description identity restores the saved layout when EDID is unavailable"
+
 reset_state
 printf 'VCP D6 SNC x04\nVCP D6 SNC x04\n' >"$ddc_sequence"
 run_guard --once >"$guard_log" 2>&1 || fail "guard saves an outage before the identity test"
 assert_state_exists
-jq '.edid = ""' "$state/suspended/HDMI-A-1.json" >"$state/suspended/HDMI-A-1.json.tmp" &&
+jq '.edid = "" | .description = ""' "$state/suspended/HDMI-A-1.json" >"$state/suspended/HDMI-A-1.json.tmp" &&
   mv -f "$state/suspended/HDMI-A-1.json.tmp" "$state/suspended/HDMI-A-1.json"
 printf 'replacement-edid\n' >"$drm/card1-HDMI-A-1/edid"
 printf 'VCP D6 SNC x01\nVCP D6 SNC x01\n' >"$ddc_sequence"

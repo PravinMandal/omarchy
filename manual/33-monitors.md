@@ -68,6 +68,8 @@ omarchy toggle monitor-power-guard on
 
 Turn it off with `omarchy toggle monitor-power-guard off`. The guard only runs while an external display is active and the session is awake. It polls every 5 seconds by default; to check more often, set `MONITOR_POWER_GUARD_INTERVAL=2` in a systemd drop-in for the user service. A failed DDC read is inconclusive unless DDC has worked before and repeated probes fail to reach the monitor; those failures are treated as a power loss. If DDC/CI has never worked for a display, the guard leaves it alone and notifies you once instead of guessing.
 
+The guard uses the monitor's EDID to recognize it after an outage. On setups where the kernel exposes no EDID, it falls back to the monitor description reported by Hyprland.
+
 The guard never disables the last active display. If no other display is active, for example in external-only mode with the laptop panel disabled, it leaves the monitor alone rather than guessing at a fallback. Turning the guard off restores any display it disabled and clears its saved state, even when the monitor is absent or still dark.
 
 This doesn't help a monitor that drops its hotplug signal, because Hyprland already handles that case.

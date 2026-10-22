@@ -170,7 +170,7 @@ clear_state() {
 }
 
 write_state() {
-  local output=$1 reason=$2 config=$3 edid=$4 file temporary
+  local output=$1 reason=$2 config=$3 edid=$4 description=$5 file temporary
   file=$(state_file "$output")
   mkdir -p "$SUSPENDED_DIR" || return 1
   temporary=$(mktemp "$file.tmp.XXXXXX") || return 1
@@ -181,7 +181,8 @@ write_state() {
     --arg reason "$reason" \
     --argjson config "$config" \
     --arg edid "$edid" \
-    '{output: $output, saved_at: $saved_at, reason: $reason, edid: $edid, config: $config}' >"$temporary" 2>/dev/null; then
+    --arg description "$description" \
+    '{output: $output, saved_at: $saved_at, reason: $reason, edid: $edid, description: $description, config: $config}' >"$temporary" 2>/dev/null; then
     mv -f "$temporary" "$file"
   else
     rm -f "$temporary"
@@ -223,6 +224,29 @@ drm_edid_hash() {
   md5sum "$file" 2>/dev/null | awk '{print $1}'
 }
 
+monitor_description() {
+  local output=$1 monitor
+  monitor=$(monitor_json "$output" 2>/dev/null) || return 1
+  jq -r '.description // empty' <<<"$monitor" 2>/dev/null
+}
+
+identity_for() {
+  local output=$1 edid description
+  edid=$(drm_edid_hash "$output" 2>/dev/null) || edid=""
+  if [[ -n $edid ]]; then
+    printf 'edid:%s\n' "$edid"
+    return 0
+  fi
+
+  # Some setups expose a zero-byte DRM EDID even though Hyprland still knows
+  # the monitor's description. Use that as a weaker identity only when EDID is
+  # unavailable; a replacement with a different description must not inherit
+  # the saved layout.
+  description=$(monitor_description "$output") || description=""
+  [[ -n $description ]] || return 1
+  printf 'desc:%s\n' "$(printf '%s' "$description" | md5sum | awk '{print $1}')"
+}
+
 ddc_bus() {
   local output=$1 directory link resolved base
   directory=$(drm_dir "$output") || return 1
@@ -239,26 +263,41 @@ ddc_marker_file() {
 }
 
 mark_ddc_ok() {
-  local output=$1 edid file saved
-  edid=$(drm_edid_hash "$output" 2>/dev/null) || edid=""
-  [[ -n $edid ]] || return 0
+  local output=$1 identity file saved
+  identity=$(identity_for "$output") || return 0
+  [[ -n $identity ]] || return 0
   file=$(ddc_marker_file "$output")
   if [[ -s $file ]]; then
     saved=$(cat "$file" 2>/dev/null) || saved=""
-    [[ $saved == "$edid" ]] && return 0
+    [[ $saved == "$identity" ]] && return 0
   fi
   mkdir -p "$DDC_OK_DIR" 2>/dev/null || return 0
-  printf '%s\n' "$edid" >"$file" 2>/dev/null || true
+  printf '%s\n' "$identity" >"$file" 2>/dev/null || true
 }
 
 ddc_known() {
-  local output=$1 file saved current
+  local output=$1 file saved current_edid current_description current_hash
   file=$(ddc_marker_file "$output")
   [[ -s $file ]] || return 1
   saved=$(cat "$file" 2>/dev/null) || return 1
   [[ -n $saved ]] || return 1
-  current=$(drm_edid_hash "$output" 2>/dev/null) || current=""
-  [[ -z $current || $saved == "$current" ]]
+
+  if [[ $saved == edid:* ]]; then
+    current_edid=$(drm_edid_hash "$output" 2>/dev/null) || current_edid=""
+    # An unreadable EDID during an outage is not a readable mismatch.
+    [[ -z $current_edid || $saved == "edid:$current_edid" ]]
+    return
+  fi
+
+  if [[ $saved == desc:* ]]; then
+    current_description=$(monitor_description "$output") || current_description=""
+    [[ -n $current_description ]] || return 1
+    current_hash=$(printf '%s' "$current_description" | md5sum | awk '{print $1}')
+    [[ $saved == "desc:$current_hash" ]]
+    return
+  fi
+
+  return 1
 }
 
 ddc_failure() {
@@ -391,21 +430,30 @@ safe_config() {
 }
 
 restore_config_for() {
-  local output=$1 monitor=$2 saved_edid current_edid config
+  local output=$1 monitor=$2 saved_edid current_edid saved_description current_description config
   saved_edid=$(state_get "$output" '.edid // ""')
   current_edid=$(drm_edid_hash "$output" 2>/dev/null) || current_edid=""
+  saved_description=$(state_get "$output" '.description // ""')
+  current_description=$(monitor_description "$output" 2>/dev/null) || current_description=""
 
-  # No saved identity cannot prove this is the same monitor. Use the safe
-  # layout instead of lending it a previous monitor's saved configuration.
-  [[ -n $saved_edid ]] || {
-    safe_config "$monitor"
-    return
-  }
-
-  # An unreadable EDID is not a readable mismatch. Keep the saved layout when
-  # the monitor is merely powered off; only a different readable identity is a
-  # replacement.
-  if [[ -n $current_edid && $saved_edid != "$current_edid" ]]; then
+  if [[ -n $saved_edid ]]; then
+    # An unreadable EDID is not a readable mismatch. Keep the saved layout when
+    # the monitor is merely powered off; only a different readable identity is
+    # a replacement.
+    if [[ -n $current_edid && $saved_edid != "$current_edid" ]]; then
+      safe_config "$monitor"
+      return
+    fi
+  elif [[ -n $saved_description ]]; then
+    # Some setups expose no EDID. The Hyprland description is the fallback
+    # identity, so a replacement with a different description gets the safe
+    # layout instead of the old monitor's layout.
+    if [[ -n $current_description && $saved_description != "$current_description" ]]; then
+      safe_config "$monitor"
+      return
+    fi
+  else
+    # No saved identity cannot prove this is the same monitor.
     safe_config "$monitor"
     return
   fi
@@ -499,7 +547,7 @@ disable_existing() {
 }
 
 disable_output() {
-  local output=$1 reason=$2 monitor config edid other now
+  local output=$1 reason=$2 monitor config edid description other now
   safe_output "$output" || return 1
   monitor=$(monitor_json "$output") || return 1
   [[ -n $monitor ]] || return 1
@@ -523,8 +571,9 @@ disable_output() {
     config=$(safe_config "$monitor")
   fi
   edid=$(drm_edid_hash "$output" 2>/dev/null) || edid=""
+  description=$(jq -r '.description // empty' <<<"$monitor" 2>/dev/null) || description=""
 
-  write_state "$output" "$reason" "$config" "$edid" || {
+  write_state "$output" "$reason" "$config" "$edid" "$description" || {
     log "could not save state for $output; leaving it enabled"
     return 1
   }
