@@ -8,12 +8,12 @@ set -uo pipefail
 
 readonly FLAG=monitor-power-guard
 readonly SERVICE=omarchy-hyprland-monitor-power-guard.service
-readonly omarchy_path=${OMARCHY_PATH:-/usr/share/omarchy}
+readonly omarchy_path=$OMARCHY_PATH
 readonly unit_source="$omarchy_path/default/systemd/user/$SERVICE"
 readonly unit_target="${XDG_CONFIG_HOME:-$HOME/.config}/systemd/user/$SERVICE"
 action=${1:-toggle}
 
-if [[ $action != on && $action != off && $action != toggle ]]; then
+if [[ $action != "on" && $action != "off" && $action != "toggle" ]]; then
   echo "Usage: $(basename "$0") {on|off|toggle}" >&2
   exit 1
 fi
@@ -63,14 +63,12 @@ disable() {
   # The guard may have disabled an output before it was turned off. Put the
   # saved layouts back and clear its state. A failed restore is transactional:
   # keep the service and flag so the guard can recover when the monitor returns.
-  if omarchy-cmd-present omarchy-hyprland-monitor-power-guard; then
-    if ! MONITOR_POWER_GUARD_NO_NOTIFY=1 omarchy-hyprland-monitor-power-guard --restore-all >/dev/null 2>&1; then
-      systemctl --user start "$SERVICE" >/dev/null 2>&1 || true
-      failed
-    fi
+  if ! MONITOR_POWER_GUARD_NO_NOTIFY=1 omarchy-hyprland-monitor-power-guard --restore-all >/dev/null 2>&1; then
+    systemctl --user start "$SERVICE" >/dev/null 2>&1 || true
+    failed
   fi
 
-  if omarchy-cmd-present omarchy-hyprland-reload-guard && omarchy-hyprland-reload-guard paused; then
+  if omarchy-hyprland-reload-guard paused; then
     :
   else
     timeout 10 hyprctl reload >/dev/null 2>&1 || true

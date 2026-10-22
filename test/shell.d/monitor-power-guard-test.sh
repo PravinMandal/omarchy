@@ -129,7 +129,7 @@ SH
 
 cat >"$fake_bin/omarchy-hyprland-monitor-internal" <<'SH'
 #!/bin/bash
-[[ ${1:-} == on ]] || exit 1
+[[ ${1:-} == "on" ]] || exit 1
 "$(dirname "$0")/hyprctl" eval 'hl.monitor({ output = "eDP-1", disabled = false })'
 rm -f "$HOME/.local/state/omarchy/toggles/hypr/internal-monitor-disable.lua"
 SH
@@ -318,6 +318,36 @@ assert_action_contains 'mode = "1920x1080@144"'
 jq -e '.[] | select(.name == "HDMI-A-1") | .x == 1280 and .y == 0 and .scale == 1.25 and .dpmsStatus == true' \
   "$monitors" >/dev/null || fail "guard restores position, scale, and DPMS"
 pass "a returning monitor is restored with its saved mode and position"
+
+# An unreadable EDID during an outage is not proof that the monitor was
+# replaced. The saved layout must survive until a readable identity differs.
+reset_state
+printf 'VCP D6 SNC x04\nVCP D6 SNC x04\nVCP D6 SNC x04\nVCP D6 SNC x04\n' >"$ddc_sequence"
+run_guard --once >"$guard_log" 2>&1
+assert_disabled HDMI-A-1
+rm -f "$drm/card1-HDMI-A-1/edid"
+set_output HDMI-A-1 true
+printf 'VCP D6 SNC x01\nVCP D6 SNC x01\n' >"$ddc_sequence"
+run_guard --once >"$guard_log" 2>&1
+assert_enabled HDMI-A-1
+assert_state_absent
+assert_action_contains 'mode = "1920x1080@144"'
+pass "an unreadable EDID keeps the saved monitor layout"
+
+# Dry-run must not clear or rewrite saved state when a replacement monitor is
+# attached, even though the normal recovery path would discard the old layout.
+reset_state
+printf 'VCP D6 SNC x04\nVCP D6 SNC x04\nVCP D6 SNC x04\nVCP D6 SNC x04\n' >"$ddc_sequence"
+run_guard --once >"$guard_log" 2>&1
+assert_state_exists
+printf 'replacement-edid\n' >"$drm/card1-HDMI-A-1/edid"
+set_output HDMI-A-1 true
+printf 'VCP D6 SNC x01\nVCP D6 SNC x01\n' >"$ddc_sequence"
+: >"$actions"
+run_guard --once --dry-run >"$guard_log" 2>&1
+assert_state_exists
+[[ ! -s $actions ]] || fail "dry-run leaves a replacement monitor's state untouched"
+pass "dry-run does not discard saved state for a replacement monitor"
 
 reset_state
 jq 'map(if .name == "eDP-1" then .disabled = true | .width = 0 | .height = 0 else . end)' "$monitors" >"$monitors.tmp" &&
@@ -599,6 +629,26 @@ if grep -F 'monitor.powerGuardRestored' "$actions" >/dev/null; then
 fi
 pass "an unverified restore keeps the suspended state"
 
+# A failed restore must keep its saved state, even when another display is
+# live. Otherwise turning the feature off would discard the only way back.
+reset_state
+printf 'VCP D6 SNC x04\nVCP D6 SNC x04\nVCP D6 SNC x04\nVCP D6 SNC x04\n' >"$ddc_sequence"
+run_guard --once >"$guard_log" 2>&1
+assert_state_exists
+mv "$fake_bin/hyprctl" "$fake_bin/hyprctl.real"
+cat >"$fake_bin/hyprctl" <<'INNER'
+#!/bin/bash
+[[ ${1:-} == "eval" ]] && exit 1
+exec "$(dirname "$0")/hyprctl.real" "$@"
+INNER
+chmod +x "$fake_bin/hyprctl"
+run_guard --restore-all >"$guard_log" 2>&1
+restore_rc=$?
+mv -f "$fake_bin/hyprctl.real" "$fake_bin/hyprctl"
+[[ $restore_rc != 0 ]] || fail "restore-all reports a failed output"
+assert_state_exists
+pass "a failed restore keeps the saved state"
+
 # Turning the feature off must not strand a display the guard disabled.
 reset_state
 run_toggle on >/dev/null 2>&1 || fail "monitor power guard toggles on before restore test"
@@ -636,6 +686,9 @@ printf 'VCP D6 SNC x04\nVCP D6 SNC x04\nVCP D6 SNC x04\nVCP D6 SNC x04\n' >"$ddc
 run_guard --once >"$guard_log" 2>&1
 jq 'map(.disabled = true | .width = 0 | .height = 0)' "$monitors" >"$monitors.tmp" && mv -f "$monitors.tmp" "$monitors"
 printf 'VCP D6 SNC x04\nVCP D6 SNC x04\nVCP D6 SNC x04\nVCP D6 SNC x04\n' >"$ddc_sequence"
+run_guard --once --dry-run >"$guard_log" 2>&1
+assert_disabled eDP-1
+assert_state_exists
 run_guard --once >"$guard_log" 2>&1
 assert_enabled eDP-1
 grep -F 'all displays are disabled' "$guard_log" >/dev/null ||
