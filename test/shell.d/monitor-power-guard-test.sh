@@ -334,6 +334,27 @@ assert_state_absent
 assert_action_contains 'mode = "1920x1080@144"'
 pass "an unreadable EDID keeps the saved monitor layout"
 
+# The DDC marker can already describe the replacement monitor by the time the
+# guard restores it. An empty saved identity must still use preferred/auto.
+reset_state
+printf 'VCP D6 SNC x04\nVCP D6 SNC x04\nVCP D6 SNC x04\nVCP D6 SNC x04\n' >"$ddc_sequence"
+run_guard --once >"$guard_log" 2>&1
+jq '.edid = ""' "$state/suspended/HDMI-A-1.json" >"$state/suspended/HDMI-A-1.json.tmp" &&
+  mv -f "$state/suspended/HDMI-A-1.json.tmp" "$state/suspended/HDMI-A-1.json"
+printf 'replacement-edid\n' >"$drm/card1-HDMI-A-1/edid"
+set_output HDMI-A-1 true
+printf 'VCP D6 SNC x01\nVCP D6 SNC x01\n' >"$ddc_sequence"
+: >"$actions"
+run_guard --once >"$guard_log" 2>&1
+assert_enabled HDMI-A-1
+assert_state_absent
+assert_action_contains 'mode = "preferred"'
+assert_action_contains 'position = "auto"'
+if grep -F 'mode = "1920x1080@144"' "$actions" >/dev/null; then
+  fail "an empty saved identity does not reuse the old layout"
+fi
+pass "an empty saved identity uses the safe layout"
+
 # Dry-run must not clear or rewrite saved state when a replacement monitor is
 # attached, even though the normal recovery path would discard the old layout.
 reset_state

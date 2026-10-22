@@ -384,21 +384,19 @@ drm_status() {
 }
 
 identity_changed() {
-  local output=$1 saved current marker
+  local output=$1 saved current
   state_exists "$output" || return 1
   saved=$(state_get "$output" '.edid // ""') || saved=""
-  if [[ -z $saved ]]; then
-    marker=$DDC_OK_DIR/$output
-    if [[ -s $marker ]]; then
-      saved=$(cat "$marker" 2>/dev/null) || saved=""
-    fi
-  fi
+  # A saved state with no identity cannot prove it belongs to this monitor.
+  # Prefer the safe layout instead of borrowing the latest DDC marker, which
+  # may already belong to a replacement monitor.
+  [[ -n $saved ]] || return 0
   current=$(drm_edid_hash "$output" 2>/dev/null) || current=""
   # An unreadable EDID is not a readable mismatch. Keep the saved layout when
   # the monitor is merely powered off; only a different readable identity is a
   # replacement.
   [[ -n $current ]] || return 1
-  [[ -z $saved || $saved != "$current" ]]
+  [[ $saved != "$current" ]]
 }
 
 drm_edid_hash() {
