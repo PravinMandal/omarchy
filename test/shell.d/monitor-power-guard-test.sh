@@ -1,6 +1,6 @@
 #!/bin/bash
 
-set -uo pipefail
+set -euo pipefail
 
 source "$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)/base-test.sh"
 
@@ -502,15 +502,17 @@ fi
 pass "turning the guard off uses the safe layout for a replacement monitor"
 
 reset_state
-FAKE_SYSTEMCTL_FAIL=enable run_toggle on >/dev/null 2>&1
-[[ $? != 0 ]] || fail "toggle on fails when the service cannot start"
+if FAKE_SYSTEMCTL_FAIL=enable run_toggle on >/dev/null 2>&1; then
+  fail "toggle on fails when the service cannot start"
+fi
 assert_flag_absent
 assert_unit_absent
 pass "failed enable rolls the opt-in flag and unit back"
 
 reset_state
 run_toggle on >/dev/null 2>&1 || fail "toggle on before the stop-failure test"
-FAKE_SYSTEMCTL_FAIL=stop run_toggle off >/dev/null 2>&1
-[[ $? != 0 ]] || fail "toggle off fails when the service cannot stop"
+if FAKE_SYSTEMCTL_FAIL=stop run_toggle off >/dev/null 2>&1; then
+  fail "toggle off fails when the service cannot stop"
+fi
 assert_flag_present
 pass "failed stop keeps the opt-in flag"
